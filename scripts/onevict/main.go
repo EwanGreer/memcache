@@ -26,14 +26,14 @@ func main() {
 	for _, k := range []string{"a", "b", "c"} {
 		time.Sleep(300 * time.Millisecond)
 		fmt.Printf("> Set(%q)\n", k)
-		c.Set(k, []byte(fmt.Sprintf("value_%s", k)))
+		c.Set(k, fmt.Appendf(nil, "value_%s", k))
 	}
 
 	fmt.Println("\nadding more items (triggers evictions):")
 	for _, k := range []string{"d", "e", "f"} {
 		time.Sleep(400 * time.Millisecond)
 		fmt.Printf("> Set(%q)\n", k)
-		c.Set(k, []byte(fmt.Sprintf("value_%s", k)))
+		c.Set(k, fmt.Appendf(nil, "value_%s", k))
 	}
 
 	time.Sleep(300 * time.Millisecond)

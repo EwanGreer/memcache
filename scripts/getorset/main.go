@@ -16,7 +16,7 @@ func main() {
 
 	fetch := func() []byte {
 		fmt.Print("  [db] fetching")
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			time.Sleep(200 * time.Millisecond)
 			fmt.Print(".")
 		}

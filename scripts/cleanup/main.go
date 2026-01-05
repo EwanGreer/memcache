@@ -24,7 +24,7 @@ func main() {
 	fmt.Printf("\n> Len() = %d\n", c.Len())
 
 	fmt.Print("\nwaiting for expiry")
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		time.Sleep(400 * time.Millisecond)
 		fmt.Print(".")
 	}
