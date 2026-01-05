@@ -6,7 +6,8 @@ A thread-safe in-memory LRU cache for Go with TTL support.
 
 - LRU eviction by item count or byte size
 - TTL expiration with lazy deletion
-- Atomic GetOrSet for cache-aside pattern
+- Atomic GetOrSet with singleflight (dedupes concurrent fetches)
+- Context support for cancellation/timeouts
 - Hit/miss/eviction statistics
 - Eviction callbacks
 
@@ -44,9 +45,16 @@ func main() {
     // TTL
     c.SetWithTTL("session", []byte("data"), 30*time.Minute)
 
-    // Atomic get-or-compute
+    // Atomic get-or-compute (concurrent calls share single fetch)
     val := c.GetOrSet("user:1", func() []byte {
         return fetchFromDB("user:1")
+    })
+
+    // With context for cancellation/timeout
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    val, err := c.GetOrSetWithContext(ctx, "user:1", func(ctx context.Context) ([]byte, error) {
+        return fetchFromDBWithContext(ctx, "user:1")
     })
 
     // Set if not exists
@@ -73,6 +81,7 @@ func main() {
 | `SetWithTTL(key, value, ttl)` | Store with expiration            |
 | `SetNX(key, value)`           | Set if not exists                |
 | `GetOrSet(key, fn)`           | Get or compute and store         |
+| `GetOrSetWithContext(ctx, key, fn)` | Same with context support  |
 | `Delete(key)`                 | Remove key                       |
 | `Has(key)`                    | Check existence                  |
 | `Keys()`                      | List all keys                    |
@@ -101,6 +110,7 @@ Or using mise:
 mise run test
 mise run test:race
 mise run test:cover
+mise run test:bench
 ```
 
 ## Demos

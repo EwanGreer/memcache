@@ -2,8 +2,11 @@ package memcache
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type item struct {
@@ -20,8 +23,8 @@ type Stats struct {
 }
 
 type Options struct {
-	MaxItems int                        // 0 means unlimited
-	MaxBytes int                        // 0 means unlimited
+	MaxItems int // 0 means unlimited
+	MaxBytes int // 0 means unlimited
 	OnEvict  func(key string, value []byte)
 }
 
@@ -36,6 +39,7 @@ type Cache struct {
 	curBytes int
 	onEvict  func(key string, value []byte)
 	stats    Stats
+	group    singleflight.Group // dedupes concurrent GetOrSet calls
 }
 
 func New() *Cache {
@@ -124,6 +128,7 @@ func (c *Cache) setInternal(key string, value []byte, ttl time.Duration) {
 		expiresAt: expiresAt,
 	}
 	elem := c.order.PushFront(it)
+
 	c.items[key] = elem
 	c.curBytes += size
 }
@@ -164,29 +169,89 @@ func (c *Cache) SetNXWithTTL(key string, value []byte, ttl time.Duration) bool {
 }
 
 // GetOrSet returns the value for key if it exists, otherwise calls fn and stores the result.
+// Concurrent calls for the same key will share a single fn invocation.
 func (c *Cache) GetOrSet(key string, fn func() []byte) []byte {
 	return c.GetOrSetWithTTL(key, fn, 0)
 }
 
 // GetOrSetWithTTL returns the value for key if it exists, otherwise calls fn and stores the result.
+// Concurrent calls for the same key will share a single fn invocation.
 func (c *Cache) GetOrSetWithTTL(key string, fn func() []byte, ttl time.Duration) []byte {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
+	if elem, ok := c.items[key]; ok {
+		it := elem.Value.(*item)
+
+		if !it.isExpired() {
+			c.stats.Hits++
+			c.order.MoveToFront(elem)
+			c.mu.Unlock()
+
+			return it.value
+		}
+
+		c.removeElement(elem)
+	}
+	c.mu.Unlock()
+
+	val, _, _ := c.group.Do(key, func() (any, error) {
+		return fn(), nil
+	})
+	value := val.([]byte)
+
+	c.mu.Lock()
+	c.stats.Misses++
+	c.setInternal(key, value, ttl)
+	c.mu.Unlock()
+
+	return value
+}
+
+// GetOrSetWithContext returns the value for key if it exists, otherwise calls fn and stores the result.
+// Supports cancellation via context. Concurrent calls for the same key share a single fn invocation.
+func (c *Cache) GetOrSetWithContext(ctx context.Context, key string, fn func(context.Context) ([]byte, error)) ([]byte, error) {
+	return c.GetOrSetWithTTLAndContext(ctx, key, fn, 0)
+}
+
+// GetOrSetWithTTLAndContext returns the value for key if it exists, otherwise calls fn and stores the result.
+// Supports cancellation via context. Concurrent calls for the same key share a single fn invocation.
+func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn func(context.Context) ([]byte, error), ttl time.Duration) ([]byte, error) {
+	// Fast path: check cache
+	c.mu.Lock()
 	if elem, ok := c.items[key]; ok {
 		it := elem.Value.(*item)
 		if !it.isExpired() {
 			c.stats.Hits++
 			c.order.MoveToFront(elem)
-			return it.value
+			c.mu.Unlock()
+			return it.value, nil
 		}
 		c.removeElement(elem)
 	}
+	c.mu.Unlock()
 
-	c.stats.Misses++
-	value := fn()
-	c.setInternal(key, value, ttl)
-	return value
+	// Slow path: singleflight fetch with context support
+	ch := c.group.DoChan(key, func() (any, error) {
+		return fn(ctx)
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		value := res.Val.([]byte)
+
+		// Store result
+		c.mu.Lock()
+		c.stats.Misses++
+		c.setInternal(key, value, ttl)
+		c.mu.Unlock()
+
+		return value, nil
+	}
 }
 
 func (c *Cache) Delete(key string) {
@@ -302,9 +367,12 @@ func (c *Cache) evict() {
 	if elem == nil {
 		return
 	}
+
 	it := elem.Value.(*item)
+
 	c.removeElement(elem)
 	c.stats.Evictions++
+
 	if c.onEvict != nil {
 		c.onEvict(it.key, it.value)
 	}

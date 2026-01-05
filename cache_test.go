@@ -2,7 +2,10 @@ package memcache
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -856,5 +859,129 @@ func TestNewWithOptions(t *testing.T) {
 
 	if !evicted {
 		t.Error("expected OnEvict to be called")
+	}
+}
+
+func TestGetOrSet_Singleflight(t *testing.T) {
+	c := New()
+	var calls int64
+	var wg sync.WaitGroup
+
+	fn := func() []byte {
+		atomic.AddInt64(&calls, 1)
+		time.Sleep(50 * time.Millisecond)
+		return []byte("computed")
+	}
+
+	// Launch 10 concurrent requests for the same key
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.GetOrSet("key", fn)
+		}()
+	}
+	wg.Wait()
+
+	// Singleflight should dedupe to 1 call
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d (singleflight not working)", calls)
+	}
+
+	// All should get the same value
+	if v := c.Get("key"); !bytes.Equal(v, []byte("computed")) {
+		t.Errorf("expected 'computed', got %q", v)
+	}
+}
+
+func TestGetOrSetWithContext_Success(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+
+	fn := func(ctx context.Context) ([]byte, error) {
+		return []byte("result"), nil
+	}
+
+	val, err := c.GetOrSetWithContext(ctx, "key", fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(val, []byte("result")) {
+		t.Errorf("expected 'result', got %q", val)
+	}
+}
+
+func TestGetOrSetWithContext_Cancellation(t *testing.T) {
+	c := New()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	fn := func(ctx context.Context) ([]byte, error) {
+		time.Sleep(100 * time.Millisecond)
+		return []byte("result"), nil
+	}
+
+	// Cancel context before fn completes
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := c.GetOrSetWithContext(ctx, "key", fn)
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestGetOrSetWithContext_Timeout(t *testing.T) {
+	c := New()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	fn := func(ctx context.Context) ([]byte, error) {
+		time.Sleep(100 * time.Millisecond)
+		return []byte("result"), nil
+	}
+
+	_, err := c.GetOrSetWithContext(ctx, "key", fn)
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestGetOrSetWithContext_FnError(t *testing.T) {
+	c := New()
+	ctx := context.Background()
+	expectedErr := fmt.Errorf("fetch failed")
+
+	fn := func(ctx context.Context) ([]byte, error) {
+		return nil, expectedErr
+	}
+
+	_, err := c.GetOrSetWithContext(ctx, "key", fn)
+	if err != expectedErr {
+		t.Errorf("expected %v, got %v", expectedErr, err)
+	}
+}
+
+func TestGetOrSetWithContext_CacheHit(t *testing.T) {
+	c := New()
+	c.Set("key", []byte("cached"))
+	ctx := context.Background()
+
+	calls := 0
+	fn := func(ctx context.Context) ([]byte, error) {
+		calls++
+		return []byte("computed"), nil
+	}
+
+	val, err := c.GetOrSetWithContext(ctx, "key", fn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(val, []byte("cached")) {
+		t.Errorf("expected 'cached', got %q", val)
+	}
+	if calls != 0 {
+		t.Errorf("expected 0 calls (cache hit), got %d", calls)
 	}
 }

@@ -17,3 +17,7 @@ run = "go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.
 [tasks."test:cover:html"]
 description = "Run tests and open HTML coverage report"
 run = "go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out"
+
+[tasks."test:bench"]
+description = "Run benchmarks"
+run = "go test -bench=. -benchmem ./..."
