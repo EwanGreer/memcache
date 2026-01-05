@@ -8,14 +8,22 @@ import (
 )
 
 func main() {
+	fmt.Println("TTL Expiration Demo")
+	fmt.Println("===================")
+
 	c := memcache.New()
 
+	fmt.Println("\n> SetWithTTL(\"token\", \"abc123\", 3s)")
 	c.SetWithTTL("token", []byte("abc123"), 3*time.Second)
-	fmt.Println("stored token with 3s TTL")
 
-	fmt.Println("get:", string(c.Get("token")))
+	fmt.Printf("\n> Get(\"token\") = %q\n", c.Get("token"))
 
-	time.Sleep(4 * time.Second)
+	fmt.Print("\nwaiting")
+	for i := 0; i < 4; i++ {
+		time.Sleep(time.Second)
+		fmt.Print(".")
+	}
+	fmt.Println()
 
-	fmt.Println("get after 4s:", string(c.Get("token")))
+	fmt.Printf("\n> Get(\"token\") = %v  (expired)\n", c.Get("token"))
 }

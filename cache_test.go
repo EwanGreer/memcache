@@ -253,8 +253,8 @@ func TestNewWithMaxSize(t *testing.T) {
 	if c == nil {
 		t.Fatal("expected non-nil cache")
 	}
-	if c.maxSize != 5 {
-		t.Errorf("maxSize = %d, want 5", c.maxSize)
+	if c.maxItems != 5 {
+		t.Errorf("maxItems = %d, want 5", c.maxItems)
 	}
 }
 
@@ -627,4 +627,234 @@ func TestConcurrentDeleteExpired(t *testing.T) {
 
 	wg.Wait()
 	// No panic or race = success
+}
+
+func TestOnEvictCallback(t *testing.T) {
+	var evicted []string
+	c := NewWithOptions(Options{
+		MaxItems: 2,
+		OnEvict: func(key string, value []byte) {
+			evicted = append(evicted, key)
+		},
+	})
+
+	c.Set("a", []byte("1"))
+	c.Set("b", []byte("2"))
+	c.Set("c", []byte("3")) // evicts "a"
+
+	if len(evicted) != 1 || evicted[0] != "a" {
+		t.Errorf("expected evicted=[a], got %v", evicted)
+	}
+}
+
+func TestStats(t *testing.T) {
+	c := NewWithMaxSize(2)
+
+	c.Set("a", []byte("1"))
+	c.Get("a")        // hit
+	c.Get("a")        // hit
+	c.Get("missing")  // miss
+	c.Set("b", []byte("2"))
+	c.Set("c", []byte("3")) // evicts "a"
+
+	stats := c.Stats()
+	if stats.Hits != 2 {
+		t.Errorf("Hits = %d, want 2", stats.Hits)
+	}
+	if stats.Misses != 1 {
+		t.Errorf("Misses = %d, want 1", stats.Misses)
+	}
+	if stats.Evictions != 1 {
+		t.Errorf("Evictions = %d, want 1", stats.Evictions)
+	}
+}
+
+func TestKeys(t *testing.T) {
+	c := New()
+
+	c.Set("a", []byte("1"))
+	c.Set("b", []byte("2"))
+	c.SetWithTTL("c", []byte("3"), 10*time.Millisecond)
+
+	keys := c.Keys()
+	if len(keys) != 3 {
+		t.Errorf("len(Keys()) = %d, want 3", len(keys))
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	keys = c.Keys()
+	if len(keys) != 2 {
+		t.Errorf("len(Keys()) after expiry = %d, want 2", len(keys))
+	}
+}
+
+func TestSetNX(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(*Cache)
+		key      string
+		value    []byte
+		expected bool
+	}{
+		{
+			name:     "set on empty cache",
+			setup:    func(c *Cache) {},
+			key:      "a",
+			value:    []byte("1"),
+			expected: true,
+		},
+		{
+			name: "key exists",
+			setup: func(c *Cache) {
+				c.Set("a", []byte("existing"))
+			},
+			key:      "a",
+			value:    []byte("new"),
+			expected: false,
+		},
+		{
+			name: "key expired",
+			setup: func(c *Cache) {
+				c.SetWithTTL("a", []byte("old"), time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+			},
+			key:      "a",
+			value:    []byte("new"),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New()
+			tt.setup(c)
+
+			got := c.SetNX(tt.key, tt.value)
+			if got != tt.expected {
+				t.Errorf("SetNX() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetOrSet(t *testing.T) {
+	c := New()
+	calls := 0
+
+	fn := func() []byte {
+		calls++
+		return []byte("computed")
+	}
+
+	// First call computes
+	v1 := c.GetOrSet("key", fn)
+	if !bytes.Equal(v1, []byte("computed")) {
+		t.Errorf("first GetOrSet = %q, want 'computed'", v1)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+
+	// Second call returns cached
+	v2 := c.GetOrSet("key", fn)
+	if !bytes.Equal(v2, []byte("computed")) {
+		t.Errorf("second GetOrSet = %q, want 'computed'", v2)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (should not call fn again)", calls)
+	}
+
+	stats := c.Stats()
+	if stats.Hits != 1 || stats.Misses != 1 {
+		t.Errorf("Stats = %+v, want Hits=1 Misses=1", stats)
+	}
+}
+
+func TestGetOrSetWithExpiry(t *testing.T) {
+	c := New()
+	calls := 0
+
+	fn := func() []byte {
+		calls++
+		return []byte("computed")
+	}
+
+	c.GetOrSetWithTTL("key", fn, 10*time.Millisecond)
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	c.GetOrSetWithTTL("key", fn, 10*time.Millisecond)
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (should recompute after expiry)", calls)
+	}
+}
+
+func TestMaxBytes(t *testing.T) {
+	c := NewWithOptions(Options{MaxBytes: 20})
+
+	c.Set("a", []byte("12345"))     // 1 + 5 = 6 bytes
+	c.Set("b", []byte("12345"))     // 1 + 5 = 6 bytes, total 12
+	c.Set("c", []byte("12345"))     // 1 + 5 = 6 bytes, total 18
+	c.Set("d", []byte("12345"))     // would be 24, evicts "a", total 18
+
+	if c.Has("a") {
+		t.Error("expected 'a' to be evicted")
+	}
+	if !c.Has("b") || !c.Has("c") || !c.Has("d") {
+		t.Error("expected 'b', 'c', 'd' to exist")
+	}
+
+	if c.Bytes() > 20 {
+		t.Errorf("Bytes() = %d, want <= 20", c.Bytes())
+	}
+}
+
+func TestBytesTracking(t *testing.T) {
+	c := New()
+
+	c.Set("key", []byte("value")) // 3 + 5 = 8
+	if c.Bytes() != 8 {
+		t.Errorf("Bytes() = %d, want 8", c.Bytes())
+	}
+
+	c.Set("key", []byte("newvalue")) // 3 + 8 = 11
+	if c.Bytes() != 11 {
+		t.Errorf("Bytes() after update = %d, want 11", c.Bytes())
+	}
+
+	c.Delete("key")
+	if c.Bytes() != 0 {
+		t.Errorf("Bytes() after delete = %d, want 0", c.Bytes())
+	}
+}
+
+func TestNewWithOptions(t *testing.T) {
+	evicted := false
+	c := NewWithOptions(Options{
+		MaxItems: 10,
+		MaxBytes: 1000,
+		OnEvict: func(key string, value []byte) {
+			evicted = true
+		},
+	})
+
+	if c.maxItems != 10 {
+		t.Errorf("maxItems = %d, want 10", c.maxItems)
+	}
+	if c.maxBytes != 1000 {
+		t.Errorf("maxBytes = %d, want 1000", c.maxBytes)
+	}
+
+	c.Set("a", []byte("1"))
+	c.Set("b", []byte("2"))
+	c.maxItems = 1 // force eviction on next set
+	c.Set("c", []byte("3"))
+
+	if !evicted {
+		t.Error("expected OnEvict to be called")
+	}
 }
