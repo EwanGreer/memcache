@@ -1,0 +1,19 @@
+[tasks.test]
+description = "Run all tests"
+run = "go test ./..."
+
+[tasks."test:verbose"]
+description = "Run all tests with verbose output"
+run = "go test -v ./..."
+
+[tasks."test:race"]
+description = "Run all tests with race detector"
+run = "go test -race ./..."
+
+[tasks."test:cover"]
+description = "Run tests with coverage report"
+run = "go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out"
+
+[tasks."test:cover:html"]
+description = "Run tests and open HTML coverage report"
+run = "go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out"
