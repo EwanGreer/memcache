@@ -228,7 +228,7 @@ func TestConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Concurrent writes
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -238,7 +238,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// Concurrent reads
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -335,7 +335,7 @@ func TestLRUOrderUpdatedOnSet(t *testing.T) {
 func TestMaxSizeZeroMeansUnlimited(t *testing.T) {
 	c := NewWithMaxSize(0)
 
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		c.Set(string(rune(i)), []byte{byte(i)})
 	}
 
@@ -352,7 +352,7 @@ func TestMaxSizeWithConcurrentAccess(t *testing.T) {
 	c := NewWithMaxSize(100)
 	var wg sync.WaitGroup
 
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -375,13 +375,13 @@ func TestMaxSizeWithConcurrentAccess(t *testing.T) {
 
 func TestSetWithTTLOverwrite(t *testing.T) {
 	tests := []struct {
-		name         string
-		initialTTL   time.Duration
-		newTTL       time.Duration
-		waitBetween  time.Duration
-		waitAfter    time.Duration
-		expectValue  bool
-		description  string
+		name        string
+		initialTTL  time.Duration
+		newTTL      time.Duration
+		waitBetween time.Duration
+		waitAfter   time.Duration
+		expectValue bool
+		description string
 	}{
 		{
 			name:        "extend TTL",
@@ -578,12 +578,12 @@ func TestConcurrentDelete(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Pre-populate
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.Set(string(rune(i)), []byte{byte(i)})
 	}
 
 	// Concurrent deletes
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -592,7 +592,7 @@ func TestConcurrentDelete(t *testing.T) {
 	}
 
 	// Concurrent sets (some will be re-adding deleted keys)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -609,7 +609,7 @@ func TestConcurrentDeleteExpired(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Concurrent operations mixing Set, SetWithTTL, and DeleteExpired
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(3)
 
 		go func(n int) {
@@ -654,9 +654,9 @@ func TestStats(t *testing.T) {
 	c := NewWithMaxSize(2)
 
 	c.Set("a", []byte("1"))
-	c.Get("a")        // hit
-	c.Get("a")        // hit
-	c.Get("missing")  // miss
+	c.Get("a")       // hit
+	c.Get("a")       // hit
+	c.Get("missing") // miss
 	c.Set("b", []byte("2"))
 	c.Set("c", []byte("3")) // evicts "a"
 
@@ -799,10 +799,10 @@ func TestGetOrSetWithExpiry(t *testing.T) {
 func TestMaxBytes(t *testing.T) {
 	c := NewWithOptions(Options{MaxBytes: 20})
 
-	c.Set("a", []byte("12345"))     // 1 + 5 = 6 bytes
-	c.Set("b", []byte("12345"))     // 1 + 5 = 6 bytes, total 12
-	c.Set("c", []byte("12345"))     // 1 + 5 = 6 bytes, total 18
-	c.Set("d", []byte("12345"))     // would be 24, evicts "a", total 18
+	c.Set("a", []byte("12345")) // 1 + 5 = 6 bytes
+	c.Set("b", []byte("12345")) // 1 + 5 = 6 bytes, total 12
+	c.Set("c", []byte("12345")) // 1 + 5 = 6 bytes, total 18
+	c.Set("d", []byte("12345")) // would be 24, evicts "a", total 18
 
 	if c.Has("a") {
 		t.Error("expected 'a' to be evicted")
@@ -874,12 +874,10 @@ func TestGetOrSet_Singleflight(t *testing.T) {
 	}
 
 	// Launch 10 concurrent requests for the same key
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 10 {
+		wg.Go(func() {
 			c.GetOrSet("key", fn)
-		}()
+		})
 	}
 	wg.Wait()
 
