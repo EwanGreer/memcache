@@ -10,6 +10,7 @@ A thread-safe in-memory LRU cache for Go with TTL support.
 - Context support for cancellation/timeouts
 - Hit/miss/eviction statistics
 - Eviction callbacks
+- Optional file persistence (survives restarts)
 
 ## Installation
 
@@ -69,6 +70,38 @@ func main() {
 }
 ```
 
+### Persistence
+
+Add file persistence to survive restarts:
+
+```go
+// Basic persistence - data auto-syncs every 30s
+c := memcache.NewWithOptions(memcache.Options{
+    FilePath: "/var/cache/myapp.db",
+})
+defer c.Close() // Final flush on shutdown
+
+// Full configuration
+c := memcache.NewWithOptions(memcache.Options{
+    MaxItems:     1000,
+    FilePath:     "/var/cache/myapp.db",
+    SyncStrategy: memcache.SyncPeriodic, // SyncNone, SyncImmediate, or SyncPeriodic
+    SyncInterval: time.Minute,           // For SyncPeriodic
+})
+defer c.Close()
+
+// Manual flush
+c.Flush()
+
+// Reload from disk
+c.Load()
+```
+
+Sync strategies:
+- `SyncNone` - Manual `Flush()` only
+- `SyncImmediate` - Write on every mutation (async)
+- `SyncPeriodic` - Background sync at intervals (default when FilePath is set)
+
 ## API
 
 | Method                        | Description                      |
@@ -90,6 +123,9 @@ func main() {
 | `Clear()`                     | Remove all items                 |
 | `DeleteExpired()`             | Bulk remove expired              |
 | `Stats()`                     | Get hit/miss/eviction counts     |
+| `Flush()`                     | Write to disk immediately        |
+| `Load()`                      | Read from disk, replace contents |
+| `Close()`                     | Stop sync, final flush           |
 
 ## Testing
 
