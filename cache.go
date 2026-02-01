@@ -25,15 +25,14 @@ type Stats struct {
 }
 
 type Options struct {
-	MaxItems int // 0 means unlimited
-	MaxBytes int // 0 means unlimited
+	MaxItems int
+	MaxBytes int
 	OnEvict  func(key string, value []byte)
 
-	// Persistence options
-	FilePath       string        // Path to cache file (empty = no persistence)
-	SyncStrategy   SyncStrategy  // When to sync (default: SyncPeriodic if FilePath set)
-	SyncInterval   time.Duration // Periodic sync interval (default: 30s)
-	SkipLoadOnInit bool          // Skip loading from file on cache creation (default: false)
+	FilePath       string
+	SyncStrategy   SyncStrategy
+	SyncInterval   time.Duration
+	SkipLoadOnInit bool
 }
 
 type Cache struct {
@@ -42,21 +41,20 @@ type Cache struct {
 	// The actual data lives in order; this map just provides O(1) lookup.
 	items    map[string]*list.Element
 	order    *list.List // front = most recent, back = least recent
-	maxItems int        // 0 means unlimited
-	maxBytes int        // 0 means unlimited
+	maxItems int
+	maxBytes int
 	curBytes int
 	onEvict  func(key string, value []byte)
 	stats    Stats
-	group    singleflight.Group // dedupes concurrent GetOrSet calls
+	group    singleflight.Group
 
-	// Persistence fields
 	filePath     string
 	syncStrategy SyncStrategy
 	syncInterval time.Duration
-	dirty        atomic.Bool   // Has unsaved changes
-	flushing     atomic.Bool   // Prevents concurrent flushes
-	stopSync     chan struct{} // Stops periodic sync goroutine
-	closeOnce    sync.Once     // Ensures Close is called only once
+	dirty        atomic.Bool
+	flushing     atomic.Bool
+	stopSync     chan struct{}
+	closeOnce    sync.Once
 }
 
 func New() *Cache {
@@ -77,28 +75,23 @@ func NewWithOptions(opts Options) *Cache {
 		onEvict:  opts.OnEvict,
 	}
 
-	// Configure persistence if FilePath is set
 	if opts.FilePath != "" {
 		c.filePath = opts.FilePath
 		c.syncStrategy = opts.SyncStrategy
 		c.syncInterval = opts.SyncInterval
 
-		// Default to SyncPeriodic if not specified
 		if c.syncStrategy == SyncNone && opts.SyncStrategy == 0 {
 			c.syncStrategy = SyncPeriodic
 		}
 
-		// Default interval
 		if c.syncInterval == 0 {
 			c.syncInterval = defaultInterval
 		}
 
-		// Load from file on init (default behavior when FilePath is set)
 		if !opts.SkipLoadOnInit {
-			_ = c.Load() // Ignore error on startup - file may not exist
+			_ = c.Load()
 		}
 
-		// Start periodic sync goroutine
 		if c.syncStrategy == SyncPeriodic {
 			c.stopSync = make(chan struct{})
 			go c.periodicSync()
@@ -118,7 +111,7 @@ func (c *Cache) periodicSync() {
 			return
 		case <-ticker.C:
 			if c.dirty.Load() {
-				_ = c.Flush() // Best effort
+				_ = c.Flush()
 			}
 		}
 	}
@@ -281,7 +274,6 @@ func (c *Cache) GetOrSetWithContext(ctx context.Context, key string, fn func(con
 // GetOrSetWithTTLAndContext returns the value for key if it exists, otherwise calls fn and stores the result.
 // Supports cancellation via context. Concurrent calls for the same key share a single fn invocation.
 func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn func(context.Context) ([]byte, error), ttl time.Duration) ([]byte, error) {
-	// Fast path: check cache
 	c.mu.Lock()
 	if elem, ok := c.items[key]; ok {
 		it := elem.Value.(*item)
@@ -295,7 +287,6 @@ func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn fu
 	}
 	c.mu.Unlock()
 
-	// Slow path: singleflight fetch with context support
 	ch := c.group.DoChan(key, func() (any, error) {
 		return fn(ctx)
 	})
@@ -309,7 +300,6 @@ func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn fu
 		}
 		value := res.Val.([]byte)
 
-		// Store result
 		c.mu.Lock()
 		c.stats.Misses++
 		c.setInternal(key, value, ttl)
@@ -452,7 +442,7 @@ func (c *Cache) markDirty() {
 	}
 	c.dirty.Store(true)
 	if c.syncStrategy == SyncImmediate {
-		go c.Flush() // Non-blocking
+		go func() { _ = c.Flush() }() // Non-blocking
 	}
 }
 
