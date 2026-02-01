@@ -486,3 +486,131 @@ func TestDirtyFlagReset(t *testing.T) {
 		t.Error("cache should not be dirty after Flush")
 	}
 }
+
+func TestLoadRespectsMaxItems(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+
+	// Create cache with no limit and save many items
+	c1 := NewWithOptions(Options{
+		FilePath:       path,
+		SyncStrategy:   SyncNone,
+		SkipLoadOnInit: true,
+	})
+	for i := range 10 {
+		c1.Set(string(rune('a'+i)), []byte("value"))
+	}
+	if err := c1.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Load into cache with MaxItems limit
+	c2 := NewWithOptions(Options{
+		FilePath:       path,
+		SyncStrategy:   SyncNone,
+		MaxItems:       5,
+		SkipLoadOnInit: true,
+	})
+	if err := c2.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if c2.Len() > 5 {
+		t.Errorf("Len = %d, want <= 5 (should respect MaxItems)", c2.Len())
+	}
+}
+
+func TestLoadRespectsMaxBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+
+	// Create cache with no limit
+	c1 := NewWithOptions(Options{
+		FilePath:       path,
+		SyncStrategy:   SyncNone,
+		SkipLoadOnInit: true,
+	})
+	// Each item is ~10 bytes (1 byte key + 9 byte value)
+	for i := range 10 {
+		c1.Set(string(rune('a'+i)), []byte("123456789"))
+	}
+	if err := c1.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// Load into cache with MaxBytes limit (~50 bytes = ~5 items)
+	c2 := NewWithOptions(Options{
+		FilePath:       path,
+		SyncStrategy:   SyncNone,
+		MaxBytes:       50,
+		SkipLoadOnInit: true,
+	})
+	if err := c2.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if c2.Bytes() > 50 {
+		t.Errorf("Bytes = %d, want <= 50 (should respect MaxBytes)", c2.Bytes())
+	}
+}
+
+func TestOnErrorCallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupted.db")
+
+	// Write garbage to file
+	if err := os.WriteFile(path, []byte("not a valid gob file"), 0644); err != nil {
+		t.Fatalf("failed to write corrupted file: %v", err)
+	}
+
+	var capturedOp string
+	var capturedErr error
+
+	// Create cache with OnError callback - load will fail
+	_ = NewWithOptions(Options{
+		FilePath:     path,
+		SyncStrategy: SyncNone,
+		OnError: func(op string, err error) {
+			capturedOp = op
+			capturedErr = err
+		},
+	})
+
+	if capturedOp != "load" {
+		t.Errorf("OnError op = %q, want %q", capturedOp, "load")
+	}
+	if capturedErr == nil {
+		t.Error("OnError should have received an error")
+	}
+}
+
+func TestSyncNoneExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+
+	c := NewWithOptions(Options{
+		FilePath:       path,
+		SyncStrategy:   SyncNone, // Explicitly set to SyncNone
+		SkipLoadOnInit: true,
+	})
+	defer c.Close()
+
+	c.Set("key", []byte("value"))
+
+	// Wait a bit - should NOT auto-flush
+	time.Sleep(50 * time.Millisecond)
+
+	// File should not exist yet (no auto-sync)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("file should not exist with SyncNone until explicit Flush")
+	}
+
+	// Manual flush should work
+	if err := c.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Error("file should exist after explicit Flush")
+	}
+}

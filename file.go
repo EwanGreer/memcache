@@ -12,11 +12,13 @@ import (
 type SyncStrategy int
 
 const (
+	// SyncDefault uses SyncPeriodic when FilePath is set.
+	SyncDefault SyncStrategy = iota
 	// SyncNone disables automatic syncing. Use Flush() manually.
-	SyncNone SyncStrategy = iota
-	// SyncImmediate writes to disk on every mutation.
+	SyncNone
+	// SyncImmediate writes to disk on every mutation (debounced).
 	SyncImmediate
-	// SyncPeriodic writes to disk at regular intervals (default when FilePath is set).
+	// SyncPeriodic writes to disk at regular intervals.
 	SyncPeriodic
 )
 
@@ -91,6 +93,13 @@ func saveToFile(path string, items []*fileItem) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
+
+	// Set restrictive permissions (owner read/write only)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("set file permissions: %w", err)
+	}
 
 	// Clean up temp file on error
 	success := false

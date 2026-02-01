@@ -33,6 +33,7 @@ type Options struct {
 	SyncStrategy   SyncStrategy
 	SyncInterval   time.Duration
 	SkipLoadOnInit bool
+	OnError        func(op string, err error) // Called on async errors (e.g., flush failures)
 }
 
 type Cache struct {
@@ -54,7 +55,9 @@ type Cache struct {
 	dirty        atomic.Bool
 	flushing     atomic.Bool
 	stopSync     chan struct{}
+	flushSignal  chan struct{} // For debounced immediate sync
 	closeOnce    sync.Once
+	onError      func(op string, err error)
 }
 
 func New() *Cache {
@@ -73,15 +76,18 @@ func NewWithOptions(opts Options) *Cache {
 		maxItems: opts.MaxItems,
 		maxBytes: opts.MaxBytes,
 		onEvict:  opts.OnEvict,
+		onError:  opts.OnError,
 	}
 
 	if opts.FilePath != "" {
 		c.filePath = opts.FilePath
-		c.syncStrategy = opts.SyncStrategy
 		c.syncInterval = opts.SyncInterval
 
-		if c.syncStrategy == SyncNone && opts.SyncStrategy == 0 {
+		// Default to SyncPeriodic when FilePath is set
+		if opts.SyncStrategy == SyncDefault {
 			c.syncStrategy = SyncPeriodic
+		} else {
+			c.syncStrategy = opts.SyncStrategy
 		}
 
 		if c.syncInterval == 0 {
@@ -89,12 +95,17 @@ func NewWithOptions(opts Options) *Cache {
 		}
 
 		if !opts.SkipLoadOnInit {
-			_ = c.Load()
+			if err := c.Load(); err != nil {
+				c.reportError("load", err)
+			}
 		}
 
+		c.stopSync = make(chan struct{})
 		if c.syncStrategy == SyncPeriodic {
-			c.stopSync = make(chan struct{})
 			go c.periodicSync()
+		} else if c.syncStrategy == SyncImmediate {
+			c.flushSignal = make(chan struct{}, 1)
+			go c.immediateSync()
 		}
 	}
 
@@ -111,9 +122,30 @@ func (c *Cache) periodicSync() {
 			return
 		case <-ticker.C:
 			if c.dirty.Load() {
-				_ = c.Flush()
+				if err := c.Flush(); err != nil {
+					c.reportError("flush", err)
+				}
 			}
 		}
+	}
+}
+
+func (c *Cache) immediateSync() {
+	for {
+		select {
+		case <-c.stopSync:
+			return
+		case <-c.flushSignal:
+			if err := c.Flush(); err != nil {
+				c.reportError("flush", err)
+			}
+		}
+	}
+}
+
+func (c *Cache) reportError(op string, err error) {
+	if c.onError != nil {
+		c.onError(op, err)
 	}
 }
 
@@ -442,7 +474,12 @@ func (c *Cache) markDirty() {
 	}
 	c.dirty.Store(true)
 	if c.syncStrategy == SyncImmediate {
-		go func() { _ = c.Flush() }() // Non-blocking
+		// Non-blocking signal to the flush worker
+		select {
+		case c.flushSignal <- struct{}{}:
+		default:
+			// Already signaled, skip
+		}
 	}
 }
 
@@ -483,6 +520,7 @@ func (c *Cache) Flush() error {
 
 // Load reads cache contents from disk, replacing current contents.
 // Returns nil if no file path is configured or file doesn't exist.
+// Respects MaxItems and MaxBytes constraints, evicting excess items.
 func (c *Cache) Load() error {
 	if c.filePath == "" {
 		return nil
@@ -516,6 +554,11 @@ func (c *Cache) Load() error {
 		elem := c.order.PushFront(it)
 		c.items[fi.Key] = elem
 		c.curBytes += size
+	}
+
+	// Enforce MaxItems/MaxBytes constraints
+	for c.shouldEvict(0) {
+		c.evict()
 	}
 
 	c.dirty.Store(false)

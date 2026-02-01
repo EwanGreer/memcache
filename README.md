@@ -87,6 +87,9 @@ c := memcache.NewWithOptions(memcache.Options{
     FilePath:     "/var/cache/myapp.db",
     SyncStrategy: memcache.SyncPeriodic, // SyncNone, SyncImmediate, or SyncPeriodic
     SyncInterval: time.Minute,           // For SyncPeriodic
+    OnError: func(op string, err error) {
+        log.Printf("cache %s error: %v", op, err)
+    },
 })
 defer c.Close()
 
@@ -99,8 +102,10 @@ c.Load()
 
 Sync strategies:
 - `SyncNone` - Manual `Flush()` only
-- `SyncImmediate` - Write on every mutation (async)
+- `SyncImmediate` - Write on every mutation (debounced)
 - `SyncPeriodic` - Background sync at intervals (default when FilePath is set)
+
+Note: LRU order is not preserved across restarts. Loaded items are treated as recently accessed.
 
 ## API
 
