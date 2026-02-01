@@ -3,7 +3,9 @@ package memcache
 import (
 	"container/list"
 	"context"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -23,9 +25,15 @@ type Stats struct {
 }
 
 type Options struct {
-	MaxItems int // 0 means unlimited
-	MaxBytes int // 0 means unlimited
+	MaxItems int
+	MaxBytes int
 	OnEvict  func(key string, value []byte)
+
+	FilePath       string
+	SyncStrategy   SyncStrategy
+	SyncInterval   time.Duration
+	SkipLoadOnInit bool
+	OnError        func(op string, err error) // Called on async errors (e.g., flush failures)
 }
 
 type Cache struct {
@@ -34,12 +42,22 @@ type Cache struct {
 	// The actual data lives in order; this map just provides O(1) lookup.
 	items    map[string]*list.Element
 	order    *list.List // front = most recent, back = least recent
-	maxItems int        // 0 means unlimited
-	maxBytes int        // 0 means unlimited
+	maxItems int
+	maxBytes int
 	curBytes int
 	onEvict  func(key string, value []byte)
 	stats    Stats
-	group    singleflight.Group // dedupes concurrent GetOrSet calls
+	group    singleflight.Group
+
+	filePath     string
+	syncStrategy SyncStrategy
+	syncInterval time.Duration
+	dirty        atomic.Bool
+	flushing     atomic.Bool
+	stopSync     chan struct{}
+	flushSignal  chan struct{} // For debounced immediate sync
+	closeOnce    sync.Once
+	onError      func(op string, err error)
 }
 
 func New() *Cache {
@@ -52,12 +70,82 @@ func NewWithMaxSize(maxItems int) *Cache {
 }
 
 func NewWithOptions(opts Options) *Cache {
-	return &Cache{
+	c := &Cache{
 		items:    make(map[string]*list.Element),
 		order:    list.New(),
 		maxItems: opts.MaxItems,
 		maxBytes: opts.MaxBytes,
 		onEvict:  opts.OnEvict,
+		onError:  opts.OnError,
+	}
+
+	if opts.FilePath != "" {
+		c.filePath = opts.FilePath
+		c.syncInterval = opts.SyncInterval
+
+		// Default to SyncPeriodic when FilePath is set
+		if opts.SyncStrategy == SyncDefault {
+			c.syncStrategy = SyncPeriodic
+		} else {
+			c.syncStrategy = opts.SyncStrategy
+		}
+
+		if c.syncInterval == 0 {
+			c.syncInterval = defaultInterval
+		}
+
+		if !opts.SkipLoadOnInit {
+			if err := c.Load(); err != nil {
+				c.reportError("load", err)
+			}
+		}
+
+		c.stopSync = make(chan struct{})
+		if c.syncStrategy == SyncPeriodic {
+			go c.periodicSync()
+		} else if c.syncStrategy == SyncImmediate {
+			c.flushSignal = make(chan struct{}, 1)
+			go c.immediateSync()
+		}
+	}
+
+	return c
+}
+
+func (c *Cache) periodicSync() {
+	ticker := time.NewTicker(c.syncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopSync:
+			return
+		case <-ticker.C:
+			if c.dirty.Load() {
+				if err := c.Flush(); err != nil {
+					c.reportError("flush", err)
+				}
+			}
+		}
+	}
+}
+
+func (c *Cache) immediateSync() {
+	for {
+		select {
+		case <-c.stopSync:
+			return
+		case <-c.flushSignal:
+			if err := c.Flush(); err != nil {
+				c.reportError("flush", err)
+			}
+		}
+	}
+}
+
+func (c *Cache) reportError(op string, err error) {
+	if c.onError != nil {
+		c.onError(op, err)
 	}
 }
 
@@ -114,6 +202,7 @@ func (c *Cache) setInternal(key string, value []byte, ttl time.Duration) {
 		it.expiresAt = expiresAt
 		c.curBytes += size
 		c.order.MoveToFront(elem)
+		c.markDirty()
 		return
 	}
 
@@ -131,6 +220,7 @@ func (c *Cache) setInternal(key string, value []byte, ttl time.Duration) {
 
 	c.items[key] = elem
 	c.curBytes += size
+	c.markDirty()
 }
 
 func (c *Cache) shouldEvict(incoming int) bool {
@@ -216,7 +306,6 @@ func (c *Cache) GetOrSetWithContext(ctx context.Context, key string, fn func(con
 // GetOrSetWithTTLAndContext returns the value for key if it exists, otherwise calls fn and stores the result.
 // Supports cancellation via context. Concurrent calls for the same key share a single fn invocation.
 func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn func(context.Context) ([]byte, error), ttl time.Duration) ([]byte, error) {
-	// Fast path: check cache
 	c.mu.Lock()
 	if elem, ok := c.items[key]; ok {
 		it := elem.Value.(*item)
@@ -230,7 +319,6 @@ func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn fu
 	}
 	c.mu.Unlock()
 
-	// Slow path: singleflight fetch with context support
 	ch := c.group.DoChan(key, func() (any, error) {
 		return fn(ctx)
 	})
@@ -244,7 +332,6 @@ func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn fu
 		}
 		value := res.Val.([]byte)
 
-		// Store result
 		c.mu.Lock()
 		c.stats.Misses++
 		c.setInternal(key, value, ttl)
@@ -289,6 +376,7 @@ func (c *Cache) Clear() {
 	c.items = make(map[string]*list.Element)
 	c.order.Init()
 	c.curBytes = 0
+	c.markDirty()
 }
 
 func (c *Cache) Len() int {
@@ -359,6 +447,7 @@ func (c *Cache) removeElement(elem *list.Element) {
 	it := elem.Value.(*item)
 	delete(c.items, it.key)
 	c.curBytes -= it.size
+	c.markDirty()
 }
 
 // Must hold lock.
@@ -376,4 +465,114 @@ func (c *Cache) evict() {
 	if c.onEvict != nil {
 		c.onEvict(it.key, it.value)
 	}
+}
+
+// markDirty sets the dirty flag and triggers immediate sync if configured.
+func (c *Cache) markDirty() {
+	if c.filePath == "" {
+		return
+	}
+	c.dirty.Store(true)
+	if c.syncStrategy == SyncImmediate {
+		// Non-blocking signal to the flush worker
+		select {
+		case c.flushSignal <- struct{}{}:
+		default:
+			// Already signaled, skip
+		}
+	}
+}
+
+// Flush writes the cache contents to disk immediately.
+// Returns nil if no file path is configured.
+func (c *Cache) Flush() error {
+	if c.filePath == "" {
+		return nil
+	}
+
+	// Prevent concurrent flushes
+	if !c.flushing.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer c.flushing.Store(false)
+
+	c.mu.RLock()
+	items := make([]*fileItem, 0, len(c.items))
+	for _, elem := range c.items {
+		it := elem.Value.(*item)
+		if !it.isExpired() {
+			items = append(items, &fileItem{
+				Key:       it.key,
+				Value:     it.value,
+				ExpiresAt: it.expiresAt,
+			})
+		}
+	}
+	c.mu.RUnlock()
+
+	if err := saveToFile(c.filePath, items); err != nil {
+		return err
+	}
+
+	c.dirty.Store(false)
+	return nil
+}
+
+// Load reads cache contents from disk, replacing current contents.
+// Returns nil if no file path is configured or file doesn't exist.
+// Respects MaxItems and MaxBytes constraints, evicting excess items.
+func (c *Cache) Load() error {
+	if c.filePath == "" {
+		return nil
+	}
+
+	items, err := loadFromFile(c.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Clear existing data
+	c.items = make(map[string]*list.Element)
+	c.order.Init()
+	c.curBytes = 0
+
+	// Load items from file
+	for _, fi := range items {
+		size := len(fi.Key) + len(fi.Value)
+		it := &item{
+			key:       fi.Key,
+			value:     fi.Value,
+			size:      size,
+			expiresAt: fi.ExpiresAt,
+		}
+		elem := c.order.PushFront(it)
+		c.items[fi.Key] = elem
+		c.curBytes += size
+	}
+
+	// Enforce MaxItems/MaxBytes constraints
+	for c.shouldEvict(0) {
+		c.evict()
+	}
+
+	c.dirty.Store(false)
+	return nil
+}
+
+// Close stops the periodic sync goroutine (if running) and performs a final flush.
+// Always call Close when done with a cache that has persistence enabled.
+func (c *Cache) Close() error {
+	c.closeOnce.Do(func() {
+		if c.stopSync != nil {
+			close(c.stopSync)
+		}
+	})
+
+	return c.Flush()
 }
