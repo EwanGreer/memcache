@@ -11,6 +11,7 @@ A thread-safe in-memory LRU cache for Go with TTL support.
 - Hit/miss/eviction statistics
 - Eviction callbacks
 - Optional file persistence (survives restarts)
+- Real-time event stream and HTTP debug viewer (opt-in)
 
 ## Installation
 
@@ -107,6 +108,48 @@ Sync strategies:
 
 Note: LRU order is not preserved across restarts. Loaded items are treated as recently accessed.
 
+### Real-Time Debug Viewer
+
+Observe cache mutations in real time via a web-based dashboard:
+
+```go
+c := memcache.NewWithOptions(memcache.Options{MaxItems: 1000})
+
+// Standalone server on separate port
+go memcache.ListenAndServeDebug(c, ":9090")
+
+// Or mount into existing server
+mux.Handle("/debug/cache/", http.StripPrefix("/debug/cache", memcache.DebugHandler(c)))
+```
+
+Open http://localhost:9090 to see:
+- **Live stats** (items, bytes, hits, misses, evictions) refreshed every 2s
+- **Items table** (key, size, TTL) in LRU order with search filter
+- **Event stream** (set, delete, evict, expire, clear) via SSE
+
+The debug server is **zero-cost when not used** — no goroutines, channels, or overhead unless you explicitly call `ListenAndServeDebug()` or `DebugHandler()`.
+
+### Event Subscriptions
+
+Subscribe to cache events programmatically:
+
+```go
+// Subscribe to all events
+sub := c.Subscribe()
+defer sub.Close()
+
+for event := range sub.C {
+    fmt.Printf("%s: key=%s size=%d\n", event.Type, event.Key, event.Size)
+}
+
+// Subscribe to specific event types
+sub := c.Subscribe(memcache.EventSet, memcache.EventEvict)
+```
+
+Event types: `EventSet`, `EventDelete`, `EventEvict`, `EventExpire`, `EventClear`
+
+Events are delivered via buffered channel (256). Slow consumers drop events (non-blocking). The subscription system is **zero-cost with no subscribers** — a fast-path `RLock` check short-circuits immediately with no allocations.
+
 ## API
 
 | Method                        | Description                      |
@@ -131,6 +174,9 @@ Note: LRU order is not preserved across restarts. Loaded items are treated as re
 | `Flush()`                     | Write to disk immediately        |
 | `Load()`                      | Read from disk, replace contents |
 | `Close()`                     | Stop sync, final flush           |
+| `Subscribe(eventTypes...)`    | Subscribe to cache events        |
+| `DebugHandler(c)`             | HTTP handler for debug dashboard |
+| `ListenAndServeDebug(c, addr)`| Standalone debug server          |
 
 ## Testing
 
@@ -157,14 +203,15 @@ mise run test:bench
 ## Demos
 
 ```bash
-go run ./scripts/main.go        # TTL expiration
-go run ./scripts/basic/main.go  # CRUD operations
-go run ./scripts/lru/main.go    # LRU eviction
+go run ./scripts/main.go            # TTL expiration
+go run ./scripts/basic/main.go      # CRUD operations
+go run ./scripts/lru/main.go        # LRU eviction
 go run ./scripts/cleanup/main.go    # DeleteExpired
 go run ./scripts/stats/main.go      # Hit/miss tracking
 go run ./scripts/getorset/main.go   # Atomic get-or-compute
 go run ./scripts/onevict/main.go    # Eviction callbacks
 go run ./scripts/maxbytes/main.go   # Byte-based limits
+go run ./scripts/debug/main.go      # Live debug viewer (opens :9090)
 ```
 
 ## License

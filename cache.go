@@ -58,6 +58,9 @@ type Cache struct {
 	flushSignal  chan struct{} // For debounced immediate sync
 	closeOnce    sync.Once
 	onError      func(op string, err error)
+
+	subMu       sync.RWMutex
+	subscribers []*subscriber
 }
 
 func New() *Cache {
@@ -101,9 +104,10 @@ func NewWithOptions(opts Options) *Cache {
 		}
 
 		c.stopSync = make(chan struct{})
-		if c.syncStrategy == SyncPeriodic {
+		switch c.syncStrategy {
+		case SyncPeriodic:
 			go c.periodicSync()
-		} else if c.syncStrategy == SyncImmediate {
+		case SyncImmediate:
 			c.flushSignal = make(chan struct{}, 1)
 			go c.immediateSync()
 		}
@@ -163,6 +167,7 @@ func (c *Cache) Get(key string) []byte {
 	it := elem.Value.(*item)
 	if it.isExpired() {
 		c.removeElement(elem)
+		c.emitEvent(EventExpire, it.key, it.size)
 		c.stats.Misses++
 		return nil
 	}
@@ -203,6 +208,7 @@ func (c *Cache) setInternal(key string, value []byte, ttl time.Duration) {
 		c.curBytes += size
 		c.order.MoveToFront(elem)
 		c.markDirty()
+		c.emitEvent(EventSet, key, size)
 		return
 	}
 
@@ -221,18 +227,22 @@ func (c *Cache) setInternal(key string, value []byte, ttl time.Duration) {
 	c.items[key] = elem
 	c.curBytes += size
 	c.markDirty()
+	c.emitEvent(EventSet, key, size)
 }
 
 func (c *Cache) shouldEvict(incoming int) bool {
 	if c.order.Len() == 0 {
 		return false
 	}
+
 	if c.maxItems > 0 && c.order.Len() >= c.maxItems {
 		return true
 	}
+
 	if c.maxBytes > 0 && c.curBytes+incoming > c.maxBytes {
 		return true
 	}
+
 	return false
 }
 
@@ -252,6 +262,7 @@ func (c *Cache) SetNXWithTTL(key string, value []byte, ttl time.Duration) bool {
 			return false
 		}
 		c.removeElement(elem)
+		c.emitEvent(EventExpire, it.key, it.size)
 	}
 
 	c.setInternal(key, value, ttl)
@@ -281,6 +292,7 @@ func (c *Cache) GetOrSetWithTTL(key string, fn func() []byte, ttl time.Duration)
 		}
 
 		c.removeElement(elem)
+		c.emitEvent(EventExpire, it.key, it.size)
 	}
 	c.mu.Unlock()
 
@@ -316,6 +328,7 @@ func (c *Cache) GetOrSetWithTTLAndContext(ctx context.Context, key string, fn fu
 			return it.value, nil
 		}
 		c.removeElement(elem)
+		c.emitEvent(EventExpire, it.key, it.size)
 	}
 	c.mu.Unlock()
 
@@ -346,7 +359,9 @@ func (c *Cache) Delete(key string) {
 	defer c.mu.Unlock()
 
 	if elem, ok := c.items[key]; ok {
+		it := elem.Value.(*item)
 		c.removeElement(elem)
+		c.emitEvent(EventDelete, it.key, it.size)
 	}
 }
 
@@ -363,6 +378,7 @@ func (c *Cache) Has(key string) bool {
 	it := elem.Value.(*item)
 	if it.isExpired() {
 		c.removeElement(elem)
+		c.emitEvent(EventExpire, it.key, it.size)
 		return false
 	}
 
@@ -377,6 +393,7 @@ func (c *Cache) Clear() {
 	c.order.Init()
 	c.curBytes = 0
 	c.markDirty()
+	c.emitEvent(EventClear, "", 0)
 }
 
 func (c *Cache) Len() int {
@@ -402,6 +419,7 @@ func (c *Cache) DeleteExpired() int {
 		it := elem.Value.(*item)
 		if it.isExpired() {
 			c.removeElement(elem)
+			c.emitEvent(EventExpire, it.key, it.size)
 			deleted++
 		}
 	}
@@ -461,6 +479,7 @@ func (c *Cache) evict() {
 
 	c.removeElement(elem)
 	c.stats.Evictions++
+	c.emitEvent(EventEvict, it.key, it.size)
 
 	if c.onEvict != nil {
 		c.onEvict(it.key, it.value)

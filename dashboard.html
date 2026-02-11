@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>memcache debug</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://unpkg.com/htmx-ext-sse@2.3.0/sse.js"></script>
+  <script src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 1rem; }
+    h1 { font-size: 1.2rem; margin-bottom: 1rem; color: #58a6ff; }
+    h2 { font-size: 1rem; margin: 1rem 0 0.5rem; color: #8b949e; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.75rem; text-align: center; }
+    .stat-label { display: block; font-size: 0.7rem; color: #8b949e; text-transform: uppercase; }
+    .stat-value { display: block; font-size: 1.4rem; color: #58a6ff; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+    th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
+    th { background: #21262d; color: #8b949e; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
+    tr:hover td { background: #1c2128; }
+    .filter-input { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; padding: 0.4rem 0.6rem; font-family: inherit; font-size: 0.85rem; width: 250px; margin-bottom: 0.5rem; }
+    .filter-input:focus { outline: none; border-color: #58a6ff; }
+    .event-log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem; max-height: 300px; overflow-y: auto; font-size: 0.8rem; }
+    .event-entry { padding: 0.2rem 0.4rem; border-bottom: 1px solid #21262d; display: flex; gap: 0.75rem; }
+    .event-entry:last-child { border-bottom: none; }
+    .event-time { color: #484f58; min-width: 80px; }
+    .event-type { font-weight: bold; min-width: 60px; }
+    .event-type.SET { color: #3fb950; }
+    .event-type.DELETE { color: #f85149; }
+    .event-type.EVICT { color: #d29922; }
+    .event-type.EXPIRE { color: #a371f7; }
+    .event-type.CLEAR { color: #f778ba; }
+    .event-key { color: #c9d1d9; }
+    .connected { color: #3fb950; }
+    .disconnected { color: #f85149; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; }
+    .status-dot.on { background: #3fb950; }
+    .status-dot.off { background: #f85149; }
+  </style>
+</head>
+<body>
+  <h1>memcache debug</h1>
+
+  <h2>Stats</h2>
+  <div hx-get="/api/stats" hx-trigger="load, every 2s" hx-swap="innerHTML">
+    Loading...
+  </div>
+
+  <div x-data="{ filter: '' }">
+    <h2>Items</h2>
+    <input class="filter-input" type="text" placeholder="Filter by key..." x-model="filter" @input="$refs.items.querySelectorAll('tbody tr').forEach(r => { r.style.display = r.cells[0] && r.cells[0].textContent.includes(filter) ? '' : 'none' })">
+    <div x-ref="items" hx-get="/api/items" hx-trigger="load, every 2s" hx-swap="innerHTML">
+      Loading...
+    </div>
+  </div>
+
+  <div x-data="eventLog()" x-init="connect()">
+    <h2>
+      Live Events
+      <span class="status-dot" :class="connected ? 'on' : 'off'"></span>
+      <span :class="connected ? 'connected' : 'disconnected'" x-text="connected ? 'connected' : 'disconnected'" style="font-size: 0.75rem; font-weight: normal;"></span>
+      <span style="font-size: 0.75rem; font-weight: normal; color: #8b949e;" x-text="'(' + events.length + ' events)'"></span>
+    </h2>
+    <div class="event-log" x-ref="log">
+      <template x-for="e in events" :key="e.id">
+        <div class="event-entry">
+          <span class="event-time" x-text="e.time"></span>
+          <span class="event-type" :class="e.typeName" x-text="e.typeName"></span>
+          <span class="event-key" x-text="e.key || '—'"></span>
+          <span style="color: #484f58;" x-text="e.size ? e.size + 'B' : ''"></span>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <script>
+    const TYPE_NAMES = { 1: 'SET', 2: 'DELETE', 4: 'EVICT', 8: 'EXPIRE', 16: 'CLEAR' };
+
+    function eventLog() {
+      return {
+        events: [],
+        connected: false,
+        eventId: 0,
+        connect() {
+          const es = new EventSource('/api/events');
+          es.onopen = () => { this.connected = true; };
+          es.onerror = () => { this.connected = false; };
+          es.onmessage = (msg) => {
+            try {
+              const data = JSON.parse(msg.data);
+              const ts = new Date(data.Timestamp);
+              this.events.unshift({
+                id: ++this.eventId,
+                time: ts.toLocaleTimeString(),
+                typeName: TYPE_NAMES[data.Type] || 'UNKNOWN',
+                key: data.Key,
+                size: data.Size,
+              });
+              if (this.events.length > 500) this.events.pop();
+            } catch(e) {}
+          };
+        }
+      };
+    }
+  </script>
+</body>
+</html>
