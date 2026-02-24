@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"time"
@@ -8,29 +9,85 @@ import (
 	"github.com/EwanGreer/memcache"
 )
 
+var adjectives = []string{"swift", "lazy", "eager", "quiet", "bold", "calm", "bright", "dark"}
+var nouns = []string{"falcon", "panda", "otter", "lynx", "crane", "viper", "gecko", "bison"}
+
+func randWord(list []string) string { return list[rand.Intn(len(list))] }
+
+func userJSON(i int) []byte {
+	type Address struct {
+		Street string `json:"street"`
+		City   string `json:"city"`
+		Zip    string `json:"zip"`
+	}
+	type User struct {
+		ID        int      `json:"id"`
+		Username  string   `json:"username"`
+		Email     string   `json:"email"`
+		Score     float64  `json:"score"`
+		Active    bool     `json:"active"`
+		Tags      []string `json:"tags"`
+		Address   Address  `json:"address"`
+		CreatedAt string   `json:"created_at"`
+	}
+	u := User{
+		ID:       i,
+		Username: randWord(adjectives) + "_" + randWord(nouns),
+		Email:    fmt.Sprintf("user%d@example.com", i),
+		Score:    float64(rand.Intn(10000)) / 100.0,
+		Active:   rand.Intn(2) == 1,
+		Tags:     []string{randWord(adjectives), randWord(nouns)},
+		Address: Address{
+			Street: fmt.Sprintf("%d %s Ave", 100+rand.Intn(900), randWord(nouns)),
+			City:   "Memville",
+			Zip:    fmt.Sprintf("%05d", rand.Intn(99999)),
+		},
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}
+	b, _ := json.Marshal(u)
+	return b
+}
+
+func sessionJSON(i int) []byte {
+	type Session struct {
+		Token     string `json:"token"`
+		UserID    int    `json:"user_id"`
+		ExpiresAt string `json:"expires_at"`
+		IP        string `json:"ip"`
+		UserAgent string `json:"user_agent"`
+	}
+	s := Session{
+		Token:     fmt.Sprintf("%x", rand.Int63()),
+		UserID:    rand.Intn(500),
+		ExpiresAt: time.Now().Add(time.Duration(5+rand.Intn(55)) * time.Minute).Format(time.RFC3339),
+		IP:        fmt.Sprintf("10.%d.%d.%d", rand.Intn(256), rand.Intn(256), rand.Intn(256)),
+		UserAgent: "Mozilla/5.0 (compatible; debug-client/" + fmt.Sprintf("%d", i) + ")",
+	}
+	b, _ := json.Marshal(s)
+	return b
+}
+
 func main() {
 	c := memcache.NewWithOptions(memcache.Options{
 		MaxItems: 50,
 		MaxBytes: 4096,
 	})
 
-	// Populate with some initial data
+	// Populate with user objects
 	for i := range 20 {
-		key := fmt.Sprintf("key:%03d", i)
-		val := fmt.Sprintf("value-%d-%s", i, time.Now().Format(time.RFC3339))
-		c.Set(key, []byte(val))
+		key := fmt.Sprintf("user:%03d", i)
+		c.Set(key, userJSON(i))
 	}
 
-	// Add some items with TTLs
+	// Add session objects with TTLs
 	for i := range 10 {
-		key := fmt.Sprintf("ttl:%03d", i)
-		val := fmt.Sprintf("expires-soon-%d", i)
-		c.SetWithTTL(key, []byte(val), time.Duration(10+i*5)*time.Second)
+		key := fmt.Sprintf("session:%03d", i)
+		c.SetWithTTL(key, sessionJSON(i), time.Duration(10+i*5)*time.Second)
 	}
 
-	fmt.Println("Cache populated with 30 items")
-	fmt.Println("Starting debug server on :9090")
-	fmt.Println("Open http://localhost:9090 in your browser")
+	fmt.Println("Starting memcache debug server")
+	fmt.Println("  cache:  50 items  /  4 KB")
+	fmt.Println("  url:    http://localhost:9090")
 
 	// Background goroutine to simulate cache activity
 	go func() {
@@ -38,20 +95,16 @@ func main() {
 			time.Sleep(time.Duration(500+rand.Intn(2000)) * time.Millisecond)
 			op := rand.Intn(4)
 			switch op {
-			case 0: // set
-				key := fmt.Sprintf("key:%03d", rand.Intn(100))
-				val := fmt.Sprintf("updated-%d", time.Now().UnixMilli())
-				c.Set(key, []byte(val))
-			case 1: // set with TTL
-				key := fmt.Sprintf("ttl:%03d", rand.Intn(50))
-				val := fmt.Sprintf("temp-%d", time.Now().UnixMilli())
-				c.SetWithTTL(key, []byte(val), time.Duration(5+rand.Intn(30))*time.Second)
+			case 0: // set user
+				i := rand.Intn(100)
+				c.Set(fmt.Sprintf("user:%03d", i), userJSON(i))
+			case 1: // set session with TTL
+				i := rand.Intn(50)
+				c.SetWithTTL(fmt.Sprintf("session:%03d", i), sessionJSON(i), time.Duration(5+rand.Intn(30))*time.Second)
 			case 2: // get
-				key := fmt.Sprintf("key:%03d", rand.Intn(100))
-				c.Get(key)
+				c.Get(fmt.Sprintf("user:%03d", rand.Intn(100)))
 			case 3: // delete
-				key := fmt.Sprintf("key:%03d", rand.Intn(100))
-				c.Delete(key)
+				c.Delete(fmt.Sprintf("user:%03d", rand.Intn(100)))
 			}
 		}
 	}()

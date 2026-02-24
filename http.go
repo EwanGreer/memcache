@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-//go:embed dashboard.html
-var dashboardFS embed.FS
+//go:embed dashboard.html partials
+var debugFS embed.FS
 
 // ItemInfo represents cache item metadata for the debug API.
 type ItemInfo struct {
@@ -115,25 +115,34 @@ func (c *Cache) debugStats() statsResponse {
 	}
 }
 
-var (
-	statsPartialTmpl = template.Must(template.New("stats").Parse(`<div class="stats-grid">
-  <div class="stat"><span class="stat-label">Items</span><span class="stat-value">{{.Items}}</span></div>
-  <div class="stat"><span class="stat-label">Bytes</span><span class="stat-value">{{.Bytes}}</span></div>
-  <div class="stat"><span class="stat-label">Max Items</span><span class="stat-value">{{.MaxItems}}</span></div>
-  <div class="stat"><span class="stat-label">Max Bytes</span><span class="stat-value">{{.MaxBytes}}</span></div>
-  <div class="stat"><span class="stat-label">Hits</span><span class="stat-value">{{.Hits}}</span></div>
-  <div class="stat"><span class="stat-label">Misses</span><span class="stat-value">{{.Misses}}</span></div>
-  <div class="stat"><span class="stat-label">Evictions</span><span class="stat-value">{{.Evictions}}</span></div>
-</div>`))
+func formatBytes(b int) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
 
-	itemsPartialTmpl = template.Must(template.New("items").Parse(`<table>
-  <thead><tr><th>Key</th><th>Size</th><th>TTL Remaining</th><th>Expires At</th></tr></thead>
-  <tbody>
-  {{range .}}<tr><td>{{.Key}}</td><td>{{.Size}}</td><td>{{.TTLRemaining}}</td><td>{{.ExpiresAt}}</td></tr>
-  {{else}}<tr><td colspan="4">No items</td></tr>
-  {{end}}</tbody>
-</table>`))
+var (
+	statsPartialTmpl *template.Template
+	itemsPartialTmpl *template.Template
 )
+
+func init() {
+	statsPartialTmpl = template.Must(
+		template.New("stats.html").
+			Funcs(template.FuncMap{"formatBytes": formatBytes}).
+			ParseFS(debugFS, "partials/stats.html"),
+	)
+	itemsPartialTmpl = template.Must(
+		template.New("items.html").ParseFS(debugFS, "partials/items.html"),
+	)
+}
 
 // DebugHandler returns an http.Handler that serves cache debug endpoints.
 func DebugHandler(c *Cache) http.Handler {
@@ -203,13 +212,13 @@ func DebugHandler(c *Cache) http.Handler {
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		data, err := dashboardFS.ReadFile("dashboard.html")
+		data, err := debugFS.ReadFile("dashboard.html")
 		if err != nil {
 			http.Error(w, "dashboard not found", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 
 	return mux
@@ -221,6 +230,9 @@ func ListenAndServeDebug(c *Cache, addr string) error {
 }
 
 func wantsHTML(r *http.Request) bool {
-	accept := r.Header.Get("Accept")
-	return strings.Contains(accept, "text/html")
+	// HTMX always sends HX-Request: true; fall back to Accept header inspection.
+	if r.Header.Get("HX-Request") == "true" {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }

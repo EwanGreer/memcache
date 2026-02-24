@@ -1,0 +1,7 @@
+<table>
+  <thead><tr><th>Key</th><th>Size</th><th>TTL</th><th>Expires</th></tr></thead>
+  <tbody>
+  {{range .}}<tr data-key="{{.Key}}" data-size="{{.Size}}" data-ttl="{{.TTLRemaining}}" data-exp="{{.ExpiresAt}}"><td class="key-cell">{{.Key}}</td><td class="size-cell">{{.Size}} B</td><td class="ttl-cell">{{if .TTLRemaining}}{{.TTLRemaining}}{{else}}—{{end}}</td><td class="exp-cell">{{.ExpiresAt}}</td></tr>
+  {{else}}<tr><td colspan="4" class="empty-row">no items in cache</td></tr>
+  {{end}}</tbody>
+</table>

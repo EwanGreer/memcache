@@ -4,80 +4,612 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>memcache debug</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.3.0/sse.js"></script>
   <script src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 1rem; }
-    h1 { font-size: 1.2rem; margin-bottom: 1rem; color: #58a6ff; }
-    h2 { font-size: 1rem; margin: 1rem 0 0.5rem; color: #8b949e; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem; }
-    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.75rem; text-align: center; }
-    .stat-label { display: block; font-size: 0.7rem; color: #8b949e; text-transform: uppercase; }
-    .stat-value { display: block; font-size: 1.4rem; color: #58a6ff; font-weight: bold; }
-    table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
-    th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
-    th { background: #21262d; color: #8b949e; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
-    tr:hover td { background: #1c2128; }
-    .filter-input { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; padding: 0.4rem 0.6rem; font-family: inherit; font-size: 0.85rem; width: 250px; margin-bottom: 0.5rem; }
-    .filter-input:focus { outline: none; border-color: #58a6ff; }
-    .event-log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.5rem; max-height: 300px; overflow-y: auto; font-size: 0.8rem; }
-    .event-entry { padding: 0.2rem 0.4rem; border-bottom: 1px solid #21262d; display: flex; gap: 0.75rem; }
-    .event-entry:last-child { border-bottom: none; }
-    .event-time { color: #484f58; min-width: 80px; }
-    .event-type { font-weight: bold; min-width: 60px; }
-    .event-type.SET { color: #3fb950; }
-    .event-type.DELETE { color: #f85149; }
-    .event-type.EVICT { color: #d29922; }
-    .event-type.EXPIRE { color: #a371f7; }
-    .event-type.CLEAR { color: #f778ba; }
-    .event-key { color: #c9d1d9; }
-    .connected { color: #3fb950; }
-    .disconnected { color: #f85149; }
-    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; }
-    .status-dot.on { background: #3fb950; }
-    .status-dot.off { background: #f85149; }
+    :root {
+      --bg:         #09090b;
+      --surface:    #111113;
+      --surface-2:  #18181b;
+      --border:     #27272a;
+      --border-hi:  #52525b;
+      --text:       #e4e4e7;
+      --muted:      #71717a;
+      --dim:        #3f3f46;
+      --accent:     #2dd4bf;
+      --accent-dim: rgba(45,212,191,.07);
+      --red:        #f87171;
+      --amber:      #fbbf24;
+      --purple:     #a78bfa;
+      --green:      #4ade80;
+      --pink:       #f472b6;
+      --blue:       #60a5fa;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      background-image: radial-gradient(circle, #27272a 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+
+    .layout { max-width: 1440px; margin: 0 auto; padding: 1.5rem; }
+
+    /* ── Header ─────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding-bottom: 1.25rem;
+      margin-bottom: 1.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .badge {
+      font-size: 0.6rem;
+      font-weight: 600;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      background: var(--accent-dim);
+      padding: .15rem .45rem;
+      border-radius: 2px;
+    }
+    header h1 { font-size: .95rem; font-weight: 500; letter-spacing: -.02em; }
+
+    /* ── Section ─────────────────────────────────── */
+    .section { margin-bottom: 1.75rem; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      margin-bottom: .75rem;
+    }
+    .section-title {
+      font-size: .6rem;
+      font-weight: 600;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .section-rule { flex: 1; height: 1px; background: var(--border); }
+
+    /* ── Stats grid ──────────────────────────────── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: .5rem;
+    }
+    .stat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-top: 2px solid transparent;
+      border-radius: 5px;
+      padding: .8rem .75rem;
+      transition: border-color .15s, background .15s;
+    }
+    .stat:hover {
+      border-color: var(--border-hi);
+      border-top-color: var(--accent);
+      background: var(--surface-2);
+    }
+    .stat-label {
+      display: block;
+      font-size: .58rem;
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: .35rem;
+    }
+    .stat-value {
+      display: block;
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -.03em;
+      line-height: 1;
+    }
+
+    /* ── Items two-column layout ─────────────────── */
+    .items-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+    @media (min-width: 860px) {
+      .items-layout { grid-template-columns: 1fr 360px; }
+    }
+
+    /* ── Table wrapper ───────────────────────────── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .table-toolbar {
+      padding: .5rem .75rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+    .filter-input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: .78rem;
+      padding: .28rem .55rem;
+      width: 220px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .filter-input::placeholder { color: var(--dim); }
+    .filter-input:focus { border-color: var(--accent); }
+
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      padding: .38rem .75rem;
+      text-align: left;
+      font-size: .58rem;
+      font-weight: 600;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    td {
+      padding: .42rem .75rem;
+      font-size: .78rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr { cursor: pointer; transition: background .1s; }
+    tbody tr:hover td { background: var(--surface-2); }
+    tbody tr.selected td { background: var(--accent-dim); }
+
+    .key-cell  { color: var(--accent); font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+    .size-cell { color: var(--muted); }
+    .ttl-cell  { color: var(--amber); font-size: .72rem; }
+    .exp-cell  { color: var(--dim);   font-size: .7rem; }
+    .empty-row { text-align: center; color: var(--dim); padding: 1.5rem !important; }
+
+    /* ── Detail panel ────────────────────────────── */
+    .detail-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 200px;
+    }
+    .detail-empty {
+      flex: 1;
+      padding: 2.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
+      color: var(--dim);
+      font-size: .72rem;
+    }
+    .detail-empty-glyph { font-size: 1.8rem; opacity: .2; line-height: 1; }
+    .detail-bar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .5rem .75rem;
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .detail-key-label {
+      flex: 1;
+      font-size: .78rem;
+      font-weight: 500;
+      color: var(--accent);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .detail-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: .85rem;
+      font-family: inherit;
+      line-height: 1;
+      padding: .15rem .25rem;
+      border-radius: 2px;
+      transition: color .15s;
+    }
+    .detail-close:hover { color: var(--text); }
+    .detail-meta {
+      display: flex;
+      gap: 1rem;
+      padding: .45rem .75rem;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .meta-item { font-size: .7rem; }
+    .meta-label { color: var(--muted); }
+    .meta-value { color: var(--text); }
+    .meta-ttl   { color: var(--amber); }
+    .detail-body {
+      padding: .75rem;
+      overflow: auto;
+      flex: 1;
+      max-height: 440px;
+    }
+
+    /* ── JSON syntax highlighting ────────────────── */
+    pre.json {
+      font-family: inherit;
+      font-size: .74rem;
+      line-height: 1.8;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .j-k { color: #2dd4bf; }
+    .j-s { color: #4ade80; }
+    .j-n { color: #60a5fa; }
+    .j-b { color: #f472b6; }
+    .j-z { color: #a78bfa; }
+    pre.raw {
+      font-family: inherit;
+      font-size: .74rem;
+      line-height: 1.8;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--text);
+    }
+    .loading-text { color: var(--dim); font-size: .72rem; }
+
+    /* ── Page grid ───────────────────────────────── */
+    .page-grid {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 1.5rem;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .page-grid { grid-template-columns: 1fr; }
+    }
+    .events-col {
+      position: sticky;
+      top: 1.5rem;
+    }
+
+    /* ── Events ──────────────────────────────────── */
+    .events-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .events-toolbar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .5rem .75rem;
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--dim);
+      flex-shrink: 0;
+    }
+    .status-dot.on  { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .status-dot.off { background: var(--red); }
+    .events-meta { font-size: .68rem; color: var(--muted); }
+    .spacer { flex: 1; }
+    .btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: .6rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      padding: .18rem .45rem;
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    .btn:hover { border-color: var(--border-hi); color: var(--text); }
+    .events-list { max-height: calc(100vh - 10rem); overflow-y: auto; }
+    .event-row {
+      display: grid;
+      grid-template-columns: 72px 52px 1fr auto;
+      align-items: center;
+      gap: .5rem;
+      padding: .28rem .75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: .72rem;
+      transition: background .1s;
+    }
+    .event-row:last-child { border-bottom: none; }
+    .event-row:hover { background: var(--surface-2); }
+    .ev-time { color: var(--dim); font-size: .65rem; }
+    .ev-type { font-weight: 600; font-size: .62rem; letter-spacing: .08em; }
+    .ev-type.SET    { color: var(--green); }
+    .ev-type.DELETE { color: var(--red); }
+    .ev-type.EVICT  { color: var(--amber); }
+    .ev-type.EXPIRE { color: var(--purple); }
+    .ev-type.CLEAR  { color: var(--pink); }
+    .ev-key  { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ev-size { color: var(--dim); font-size: .65rem; }
+    .events-empty { padding: 1.25rem; text-align: center; font-size: .72rem; color: var(--dim); }
+
+    /* ── Scrollbars ──────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
   </style>
 </head>
 <body>
-  <h1>memcache debug</h1>
+  <div class="layout">
 
-  <h2>Stats</h2>
-  <div hx-get="/api/stats" hx-trigger="load, every 0.5s" hx-swap="innerHTML">
-    Loading...
-  </div>
+    <header>
+      <span class="badge">debug</span>
+      <h1>memcache</h1>
+    </header>
 
-  <div x-data="{ filter: '' }">
-    <h2>Items</h2>
-    <input class="filter-input" type="text" placeholder="Filter by key..." x-model="filter" @input="$refs.items.querySelectorAll('tbody tr').forEach(r => { r.style.display = r.cells[0] && r.cells[0].textContent.includes(filter) ? '' : 'none' })">
-    <div x-ref="items" hx-get="/api/items" hx-trigger="load, every 2s" hx-swap="innerHTML">
-      Loading...
-    </div>
-  </div>
+    <div class="page-grid">
 
-  <div x-data="eventLog()" x-init="connect()">
-    <h2>
-      Live Events
-      <span class="status-dot" :class="connected ? 'on' : 'off'"></span>
-      <span :class="connected ? 'connected' : 'disconnected'" x-text="connected ? 'connected' : 'disconnected'" style="font-size: 0.75rem; font-weight: normal;"></span>
-      <span style="font-size: 0.75rem; font-weight: normal; color: #8b949e;" x-text="'(' + events.length + ' events)'"></span>
-    </h2>
-    <div class="event-log" x-ref="log">
-      <template x-for="e in events" :key="e.id">
-        <div class="event-entry">
-          <span class="event-time" x-text="e.time"></span>
-          <span class="event-type" :class="e.typeName" x-text="e.typeName"></span>
-          <span class="event-key" x-text="e.key || '—'"></span>
-          <span style="color: #484f58;" x-text="e.size ? e.size + 'B' : ''"></span>
+      <!-- Main column: stats + items -->
+      <div class="main-col">
+
+        <section class="section">
+          <div class="section-head">
+            <span class="section-title">stats</span>
+            <div class="section-rule"></div>
+          </div>
+          <div x-data="statsSection()">
+            <div class="stats-grid">
+              <div class="stat"><span class="stat-label">Items</span><span class="stat-value" x-text="s.items">—</span></div>
+              <div class="stat"><span class="stat-label">Bytes</span><span class="stat-value" x-text="s.bytes">—</span></div>
+              <div class="stat"><span class="stat-label">Max Items</span><span class="stat-value" x-text="s.maxItems">—</span></div>
+              <div class="stat"><span class="stat-label">Max Bytes</span><span class="stat-value" x-text="s.maxBytes">—</span></div>
+              <div class="stat"><span class="stat-label">Hits</span><span class="stat-value" x-text="s.hits">—</span></div>
+              <div class="stat"><span class="stat-label">Misses</span><span class="stat-value" x-text="s.misses">—</span></div>
+              <div class="stat"><span class="stat-label">Evictions</span><span class="stat-value" x-text="s.evictions">—</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-head">
+            <span class="section-title">items</span>
+            <div class="section-rule"></div>
+          </div>
+          <div class="items-layout" x-data="itemsSection()">
+
+            <!-- Table -->
+            <div class="table-wrap">
+              <div class="table-toolbar">
+                <input class="filter-input" type="text" placeholder="filter keys…" x-model="filter" @input="applyFilter()">
+              </div>
+              <div x-ref="items" hx-get="/api/items" hx-trigger="load, every 2s" hx-swap="innerHTML" hx-headers='{"Accept":"text/html"}'>Loading…</div>
+            </div>
+
+            <!-- Detail panel -->
+            <div class="detail-panel">
+              <template x-if="!selected">
+                <div class="detail-empty">
+                  <span class="detail-empty-glyph">⊡</span>
+                  <span>select an item to inspect</span>
+                </div>
+              </template>
+              <template x-if="selected">
+                <div style="display:flex;flex-direction:column;height:100%">
+                  <div class="detail-bar">
+                    <span class="detail-key-label" x-text="selected.key"></span>
+                    <button class="detail-close" @click="deselect()">✕</button>
+                  </div>
+                  <div class="detail-meta">
+                    <span class="meta-item">
+                      <span class="meta-label">size </span>
+                      <span class="meta-value" x-text="selected.size + ' B'"></span>
+                    </span>
+                    <template x-if="selected.ttl">
+                      <span class="meta-item">
+                        <span class="meta-label">ttl </span>
+                        <span class="meta-ttl" x-text="selected.ttl"></span>
+                      </span>
+                    </template>
+                    <template x-if="selected.exp">
+                      <span class="meta-item">
+                        <span class="meta-label">exp </span>
+                        <span class="meta-value" x-text="selected.exp"></span>
+                      </span>
+                    </template>
+                  </div>
+                  <div class="detail-body">
+                    <template x-if="loading">
+                      <span class="loading-text">loading…</span>
+                    </template>
+                    <template x-if="!loading && parsedJson !== null">
+                      <pre class="json" x-html="parsedJson"></pre>
+                    </template>
+                    <template x-if="!loading && parsedJson === null && rawValue !== null">
+                      <pre class="raw" x-text="rawValue"></pre>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+          </div>
+        </section>
+
+      </div><!-- /main-col -->
+
+      <!-- Events column: sticky sidebar -->
+      <aside class="events-col" x-data="eventLog()" x-init="connect()">
+        <div class="section-head">
+          <span class="section-title">live events</span>
+          <div class="section-rule"></div>
         </div>
-      </template>
-    </div>
+        <div class="events-wrap">
+          <div class="events-toolbar">
+            <span class="status-dot" :class="connected ? 'on' : 'off'"></span>
+            <span class="events-meta" x-text="connected ? 'connected' : 'disconnected'"></span>
+            <span class="events-meta" x-text="'· ' + events.length + ' events'"></span>
+            <div class="spacer"></div>
+            <button class="btn" @click="clear()">clear</button>
+          </div>
+          <div class="events-list">
+            <template x-if="events.length === 0">
+              <div class="events-empty">no events yet</div>
+            </template>
+            <template x-for="e in events" :key="e.id">
+              <div class="event-row">
+                <span class="ev-time"  x-text="e.time"></span>
+                <span class="ev-type"  :class="e.typeName" x-text="e.typeName"></span>
+                <span class="ev-key"   x-text="e.key || '—'"></span>
+                <span class="ev-size"  x-text="e.size ? e.size + 'B' : ''"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </aside><!-- /events-col -->
+
+    </div><!-- /page-grid -->
+
   </div>
 
   <script>
     const TYPE_NAMES = { 1: 'SET', 2: 'DELETE', 4: 'EVICT', 8: 'EXPIRE', 16: 'CLEAR' };
 
+    function fmtBytes(b) {
+      if (b >= 1 << 30) return (b / (1 << 30)).toFixed(1) + ' GB';
+      if (b >= 1 << 20) return (b / (1 << 20)).toFixed(1) + ' MB';
+      if (b >= 1 << 10) return (b / (1 << 10)).toFixed(1) + ' KB';
+      return b + ' B';
+    }
+
+    function statsSection() {
+      return {
+        s: { items: '—', bytes: '—', maxItems: '—', maxBytes: '—', hits: '—', misses: '—', evictions: '—' },
+        init() { this.tick(); },
+        async tick() {
+          try {
+            const d = await fetch('/api/stats').then(r => r.json());
+            this.s = {
+              items:     d.items,
+              bytes:     fmtBytes(d.bytes),
+              maxItems:  d.max_items,
+              maxBytes:  fmtBytes(d.max_bytes),
+              hits:      d.hits,
+              misses:    d.misses,
+              evictions: d.evictions,
+            };
+          } catch {}
+          setTimeout(() => this.tick(), 500);
+        },
+      };
+    }
+
+    // ── itemsSection ── unified component for table + detail panel
+    function itemsSection() {
+      return {
+        filter: '',
+        selected: null,
+        loading: false,
+        parsedJson: null,
+        rawValue: null,
+
+        init() {
+          // Delegated click: attached once to the wrapper div which is never
+          // replaced by HTMX (only its innerHTML changes), so it survives every
+          // 2s refresh without needing to re-wire per-row handlers.
+          this.$refs.items.addEventListener('click', (e) => {
+            const row = e.target.closest('tr[data-key]');
+            if (row) this.pickRow(row);
+          });
+          // After each HTMX swap re-apply the filter and restore the highlight.
+          this.$refs.items.addEventListener('htmx:afterSettle', () => {
+            this.applyFilter();
+            this.restoreSelection();
+          });
+        },
+
+        applyFilter() {
+          this.$refs.items.querySelectorAll('tbody tr[data-key]').forEach(r => {
+            r.style.display = r.dataset.key.includes(this.filter) ? '' : 'none';
+          });
+        },
+
+        restoreSelection() {
+          if (!this.selected) return;
+          this.$refs.items.querySelectorAll('tbody tr[data-key]').forEach(r => {
+            r.classList.toggle('selected', r.dataset.key === this.selected.key);
+          });
+        },
+
+        pickRow(row) {
+          this.$refs.items.querySelectorAll('tbody tr').forEach(r => r.classList.remove('selected'));
+          row.classList.add('selected');
+          this.selected = {
+            key:  row.dataset.key,
+            size: row.dataset.size,
+            ttl:  row.dataset.ttl,
+            exp:  row.dataset.exp,
+          };
+          this.loadValue(row.dataset.key);
+        },
+
+        deselect() {
+          this.$refs.items.querySelectorAll('tbody tr').forEach(r => r.classList.remove('selected'));
+          this.selected = null;
+          this.parsedJson = null;
+          this.rawValue = null;
+        },
+
+        async loadValue(key) {
+          this.loading = true;
+          this.parsedJson = null;
+          this.rawValue = null;
+          try {
+            const res = await fetch(`/api/items/${encodeURIComponent(key)}`);
+            if (!res.ok) { this.rawValue = `HTTP ${res.status}`; return; }
+            const data = await res.json();
+            const decoded = atob(data.value);
+            try {
+              this.parsedJson = highlightJson(JSON.stringify(JSON.parse(decoded), null, 2));
+            } catch {
+              this.rawValue = decoded;
+            }
+          } catch (e) {
+            this.rawValue = String(e);
+          } finally {
+            this.loading = false;
+          }
+        },
+      };
+    }
+
+    // ── eventLog ──────────────────────────────────────────────────────────────
     function eventLog() {
       return {
         events: [],
@@ -85,24 +617,40 @@
         eventId: 0,
         connect() {
           const es = new EventSource('/api/events');
-          es.onopen = () => { this.connected = true; };
+          es.onopen  = () => { this.connected = true; };
           es.onerror = () => { this.connected = false; };
           es.onmessage = (msg) => {
             try {
-              const data = JSON.parse(msg.data);
-              const ts = new Date(data.Timestamp);
+              const d = JSON.parse(msg.data);
               this.events.unshift({
                 id: ++this.eventId,
-                time: ts.toLocaleTimeString(),
-                typeName: TYPE_NAMES[data.Type] || 'UNKNOWN',
-                key: data.Key,
-                size: data.Size,
+                time: new Date(d.Timestamp).toLocaleTimeString(),
+                typeName: TYPE_NAMES[d.Type] || 'UNKNOWN',
+                key: d.Key,
+                size: d.Size,
               });
               if (this.events.length > 500) this.events.pop();
-            } catch(e) {}
+            } catch {}
           };
-        }
+        },
+        clear() { this.events = []; },
       };
+    }
+
+    // ── JSON syntax highlighter ───────────────────────────────────────────────
+    function highlightJson(s) {
+      s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return s.replace(
+        /("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+        m => {
+          if (m[0] === '"') {
+            return /:$/.test(m) ? `<span class="j-k">${m}</span>` : `<span class="j-s">${m}</span>`;
+          }
+          if (m === 'true' || m === 'false') return `<span class="j-b">${m}</span>`;
+          if (m === 'null')                  return `<span class="j-z">${m}</span>`;
+          return `<span class="j-n">${m}</span>`;
+        }
+      );
     }
   </script>
 </body>
