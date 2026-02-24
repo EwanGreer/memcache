@@ -3,6 +3,7 @@ package memcache
 import (
 	"container/list"
 	"context"
+	"encoding/base64"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -594,4 +595,81 @@ func (c *Cache) Close() error {
 	})
 
 	return c.Flush()
+}
+
+// snapshot walks the LRU list front-to-back and returns item metadata.
+func (c *Cache) snapshot() []ItemInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	items := make([]ItemInfo, 0, c.order.Len())
+	for e := c.order.Front(); e != nil; e = e.Next() {
+		it := e.Value.(*item)
+		if it.isExpired() {
+			continue
+		}
+
+		info := ItemInfo{
+			Key:  it.key,
+			Size: it.size,
+		}
+
+		if !it.expiresAt.IsZero() {
+			info.ExpiresAt = it.expiresAt.Format(time.RFC3339)
+			remaining := time.Until(it.expiresAt)
+
+			if remaining > 0 {
+				info.TTLRemaining = remaining.Truncate(time.Second).String()
+			}
+		}
+		items = append(items, info)
+	}
+	return items
+}
+
+// getItem returns detail for a single cache key.
+func (c *Cache) getItem(key string) (*ItemDetail, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	elem, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+
+	it := elem.Value.(*item)
+	if it.isExpired() {
+		return nil, false
+	}
+
+	detail := &ItemDetail{
+		ItemInfo: ItemInfo{
+			Key:  it.key,
+			Size: it.size,
+		},
+		Value: base64.StdEncoding.EncodeToString(it.value),
+	}
+
+	if !it.expiresAt.IsZero() {
+		detail.ExpiresAt = it.expiresAt.Format(time.RFC3339)
+		remaining := time.Until(it.expiresAt)
+		if remaining > 0 {
+			detail.TTLRemaining = remaining.Truncate(time.Second).String()
+		}
+	}
+	return detail, true
+}
+
+func (c *Cache) debugStats() statsResponse {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return statsResponse{
+		Hits:      c.stats.Hits,
+		Misses:    c.stats.Misses,
+		Evictions: c.stats.Evictions,
+		Items:     c.order.Len(),
+		Bytes:     c.curBytes,
+		MaxItems:  c.maxItems,
+		MaxBytes:  c.maxBytes,
+	}
 }
